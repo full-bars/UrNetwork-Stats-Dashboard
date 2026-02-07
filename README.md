@@ -1,3 +1,8 @@
+# ⚠️ This version is deprecated ⚠️
+## Switch to the new [UrDashboard](https://github.com/techroy23/UrDashboard) for the latest features and updates!
+
+---
+
 # UR Transfer Stats Dashboard
 
 A lightweight Flask dashboard to track your BringYour.io bandwidth usage.  
