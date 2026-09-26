@@ -12,6 +12,7 @@ from flask import (
     redirect, url_for, flash, current_app, jsonify
 )
 from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy import or_
 from flask_apscheduler import APScheduler
 
 # Load .env variables into environment
@@ -157,6 +158,20 @@ def login_check():
 # ----------------------------------------
 # Retry budget for one quarter-hour tick. The scheduler fires every 15 minutes,
 # so retries must finish well inside that or they would delay the next window.
+# IN_FLIGHT marks a row whose fetch is still retrying. Such rows are hidden from
+# the table: the window has not landed yet, so it is not a gap. If the retries
+# are exhausted the row keeps a real reason (e.g. "HTTP 500") and is shown.
+IN_FLIGHT = "__pending__"
+# Rows written by the first version of this feature used a bare "pending"
+# marker; treat those as in-flight too so they never render as a real gap.
+IN_FLIGHT_LEGACY = "pending"
+IN_FLIGHT_MARKERS = (IN_FLIGHT, IN_FLIGHT_LEGACY)
+
+
+def _is_in_flight(row_error):
+    return row_error is None or row_error in IN_FLIGHT_MARKERS
+
+
 RETRY_BUDGET_SECONDS = 180
 RETRY_BACKOFFS      = (5, 15, 45, 90)   # cumulative: 5, 20, 65, 155s (< 180)
 
@@ -246,7 +261,7 @@ def log_stats():
     real values and the error is cleared.
     """
     with app.app_context():
-        entry = Stats(fetch_error="pending")
+        entry = Stats(fetch_error=IN_FLIGHT)
         db.session.add(entry)
         db.session.commit()
         current_app.logger.info(f"Placeholder written @ {entry.timestamp}")
@@ -363,6 +378,14 @@ TEMPLATE = """
     }
     [data-bs-theme="light"] .gap-flag { color: #991b1b; background: rgba(220, 38, 38, .10); border-color: rgba(185, 28, 28, .40); }
     .gap-dash { color: #6b7280; }
+    /* A window whose fetch is still retrying: neutral, not an error. */
+    .gap-pending {
+      display: inline-block; padding: 1px 7px; border-radius: 999px;
+      font-size: 11px; font-weight: 600; letter-spacing: .02em;
+      background: rgba(148, 163, 184, .16); color: #cbd5e1;
+      border: 1px solid rgba(148, 163, 184, .40); white-space: nowrap;
+    }
+    [data-bs-theme="light"] .gap-pending { color: #475569; background: rgba(100,116,139,.12); border-color: rgba(71,85,105,.35); }
     .heat-1  { color: #cb2929 !important; }
     .heat-2  { color: #dd3737 !important; }
     .heat-3  { color: #ef4444 !important; }
@@ -479,7 +502,9 @@ TEMPLATE = """
         <td>{% if row.paid_gb is not none %}{{ "%.3f"|format(row.paid_gb) }}{% else %}<span class="gap-dash">&mdash;</span>{% endif %}</td>
         <td>{% if row.unpaid_bytes is not none %}{{ "{:,}".format(row.unpaid_bytes) }}{% else %}<span class="gap-dash">&mdash;</span>{% endif %}</td>
         <td{% if row.fetch_error %} class="gap-flag-cell"{% endif %}>
-          {% if row.fetch_error %}
+          {% if row.fetch_error in (IN_FLIGHT, 'pending') %}
+            <span class="gap-pending">fetching&hellip;</span>
+          {% elif row.fetch_error %}
             <span class="gap-flag">{{ row.fetch_error }}</span>
           {% elif row.delta_bytes is not none %}
             {{ "{:,}".format(row.delta_bytes) }}
@@ -563,6 +588,7 @@ TEMPLATE = """
     const status  = document.getElementById('scrollStatus');
     const darkOn  = {{ 'true' if dark else 'false' }};
     const limit   = {{ scroll_page_size }};
+    const IN_FLIGHT = {{ in_flight | tojson }};
     const HEAT_BOUNDS = {{ heat_bounds | tojson }};
     const PULSE_FROM  = {{ pulse_from }};
     const BREATHE_BELOW = {{ breathe_below_gb }};
@@ -619,8 +645,10 @@ TEMPLATE = """
         const td = document.createElement('td');
         td.textContent = text;
         if (gap){
-          if (i === 3) td.className = 'gap-flag';
-          if (i === 3) tr.className = 'gap-row';
+          if (i === 3){
+            td.className = ((r.fetch_error === IN_FLIGHT || r.fetch_error === 'pending')) ? 'gap-pending' : 'gap-flag';
+            tr.className = 'gap-row';
+          }
           return;   // no heat colour or animation on a gap row
         }
         // Change Bytes: default body color. Change (GB): traffic-light heat
@@ -811,7 +839,12 @@ def index():
     """
     dark = request.args.get('dark', '1') == '1'
     # One extra row so the last rendered row still gets its delta.
+    # A placeholder whose fetch is still in flight is not a gap yet, so it is
+    # hidden: the window simply has not landed. Rows that survived the retry
+    # budget carry a real reason and are shown.
     entries = (Stats.query
+               .filter(or_(Stats.fetch_error.is_(None),
+                           Stats.fetch_error.notin_(IN_FLIGHT_MARKERS)))
                .order_by(Stats.timestamp.desc())
                .limit(FIRST_PAGE_SIZE + 1)
                .all())
@@ -838,6 +871,7 @@ def index():
         pulse_class     = pulse_class,
         pulse_style     = pulse_style,
         heat_bounds     = list(HEAT_BOUNDS),
+        in_flight       = IN_FLIGHT,
         pulse_from      = PULSE_FROM,
         breathe_below_gb= BREATHE_BELOW,
         static_below    = STATIC_BELOW,
@@ -867,7 +901,10 @@ def api_rows():
     except ValueError:
         limit = SCROLL_PAGE_SIZE
 
-    q = Stats.query.order_by(Stats.timestamp.desc())
+    q = (Stats.query
+         .filter(or_(Stats.fetch_error.is_(None),
+                     Stats.fetch_error.notin_(IN_FLIGHT_MARKERS)))
+         .order_by(Stats.timestamp.desc()))
     if cursor:
         try:
             cur_dt = datetime.datetime.fromisoformat(cursor)
