@@ -293,37 +293,37 @@ TEMPLATE = """
        1 GB or above. The 1-10 GB band is the common working range, so it gets
        many distinct steps (green -> mint -> emerald -> cyan -> blue) rather
        than one flat colour. Purple ends before 20; 20 GB and up is hot pink. */
-    .heat-0  { color: #e5e7eb !important; }   /* zero change: plain white, static */
-    .heat-1  { color: #e5e7eb !important; }
-    .heat-2  { color: #e5e7eb !important; }
-    .heat-3  { color: #e5e7eb !important; }   /* bad */
+    .heat-0  { color: #e5e7eb !important; }
+    .heat-1  { color: #cb2929 !important; }
+    .heat-2  { color: #dd3737 !important; }
+    .heat-3  { color: #ef4444 !important; }
     .heat-4  { color: #f25435 !important; }
     .heat-5  { color: #f66325 !important; }
-    .heat-6  { color: #f97316 !important; }   /* low */
+    .heat-6  { color: #f97316 !important; }
     .heat-7  { color: #fa8c1b !important; }
     .heat-8  { color: #faa61f !important; }
-    .heat-9  { color: #fbbf24 !important; }   /* medium */
+    .heat-9  { color: #fbbf24 !important; }
     .heat-10 { color: #b3c137 !important; }
     .heat-11 { color: #6ac34b !important; }
-    .heat-12 { color: #22c55e !important; }   /* >=1 GB: baseline good */
+    .heat-12 { color: #22c55e !important; }
     .heat-13 { color: #2fcd69 !important; }
     .heat-14 { color: #3dd675 !important; }
-    .heat-15 { color: #4ade80 !important; }   /* 2 GB */
+    .heat-15 { color: #4ade80 !important; }
     .heat-16 { color: #31e08b !important; }
     .heat-17 { color: #19e395 !important; }
-    .heat-18 { color: #00e5a0 !important; }   /* 4 GB, bright mint */
+    .heat-18 { color: #00e5a0 !important; }
     .heat-19 { color: #0bdfba !important; }
     .heat-20 { color: #17d9d4 !important; }
-    .heat-21 { color: #22d3ee !important; }   /* 7 GB, cyan */
+    .heat-21 { color: #22d3ee !important; }
     .heat-22 { color: #29ccf1 !important; }
     .heat-23 { color: #31c4f5 !important; }
-    .heat-24 { color: #38bdf8 !important; }   /* 10 GB, blue */
+    .heat-24 { color: #38bdf8 !important; }
     .heat-25 { color: #50adf8 !important; }
     .heat-26 { color: #699cf8 !important; }
-    .heat-27 { color: #818cf8 !important; }   /* 15 GB, indigo */
+    .heat-27 { color: #818cf8 !important; }
     .heat-28 { color: #a783e2 !important; }
-    .heat-29 { color: #ce7bcc !important; }   /* purple band ends here */
-    .heat-30 { color: #f472b6 !important; }   /* >=20 GB, hot pink */
+    .heat-29 { color: #ce7bcc !important; }
+    .heat-30 { color: #f472b6 !important; }
 
     /* Soft "breathe" for the low end (under 1 GB). Opacity only, so it is
        cheap and never fights the text-shadow pulse used above 1 GB. Keeps the
@@ -352,6 +352,42 @@ TEMPLATE = """
     @media (prefers-reduced-motion: reduce) {
       .heat-pulse, .heat-pulse-hard, .heat-breathe { animation: none; }
     }
+
+    /* Light mode needs its own ramp: the dark-mode tier colours are tuned for a
+       dark background and most fall below readable contrast on white (notably
+       the whole green/cyan band, and heat-0 which would be white-on-white).
+       Same hues, darkened to clear 4.5:1 on white. */
+    [data-bs-theme="light"] .heat-0  { color: #374151 !important; }
+    [data-bs-theme="light"] .heat-1  { color: #cb2929 !important; }
+    [data-bs-theme="light"] .heat-2  { color: #cb3333 !important; }
+    [data-bs-theme="light"] .heat-3  { color: #ca3a3a !important; }
+    [data-bs-theme="light"] .heat-4  { color: #cd472d !important; }
+    [data-bs-theme="light"] .heat-5  { color: #bf4d1d !important; }
+    [data-bs-theme="light"] .heat-6  { color: #b25310 !important; }
+    [data-bs-theme="light"] .heat-7  { color: #a55c11 !important; }
+    [data-bs-theme="light"] .heat-8  { color: #986513 !important; }
+    [data-bs-theme="light"] .heat-9  { color: #8d6b14 !important; }
+    [data-bs-theme="light"] .heat-10 { color: #6d7622 !important; }
+    [data-bs-theme="light"] .heat-11 { color: #468131 !important; }
+    [data-bs-theme="light"] .heat-12 { color: #17833e !important; }
+    [data-bs-theme="light"] .heat-13 { color: #1f8745 !important; }
+    [data-bs-theme="light"] .heat-14 { color: #258347 !important; }
+    [data-bs-theme="light"] .heat-15 { color: #2d864e !important; }
+    [data-bs-theme="light"] .heat-16 { color: #1b7d4e !important; }
+    [data-bs-theme="light"] .heat-17 { color: #0e7f53 !important; }
+    [data-bs-theme="light"] .heat-18 { color: #008059 !important; }
+    [data-bs-theme="light"] .heat-19 { color: #067c66 !important; }
+    [data-bs-theme="light"] .heat-20 { color: #0e8481 !important; }
+    [data-bs-theme="light"] .heat-21 { color: #158090 !important; }
+    [data-bs-theme="light"] .heat-22 { color: #197b92 !important; }
+    [data-bs-theme="light"] .heat-23 { color: #1d7894 !important; }
+    [data-bs-theme="light"] .heat-24 { color: #257ca4 !important; }
+    [data-bs-theme="light"] .heat-25 { color: #3a7bb2 !important; }
+    [data-bs-theme="light"] .heat-26 { color: #4b6fb2 !important; }
+    [data-bs-theme="light"] .heat-27 { color: #646dc1 !important; }
+    [data-bs-theme="light"] .heat-28 { color: #8366b0 !important; }
+    [data-bs-theme="light"] .heat-29 { color: #945892 !important; }
+    [data-bs-theme="light"] .heat-30 { color: #af5283 !important; }
   </style>
 
   <!-- TABLE (newest first) -->
