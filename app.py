@@ -55,10 +55,15 @@ class Stats(db.Model):
     """
     id           = db.Column(db.Integer,   primary_key=True)
     timestamp    = db.Column(db.DateTime,  server_default=db.func.now())
-    paid_bytes   = db.Column(db.BigInteger, nullable=False)
-    paid_gb      = db.Column(db.Float,      nullable=False)
-    unpaid_bytes = db.Column(db.BigInteger, nullable=False)
-    unpaid_gb    = db.Column(db.Float,      nullable=False)
+    # Nullable so a quarter-hour that the upstream API could not serve is still
+    # recorded as a visible gap instead of vanishing from the grid.
+    paid_bytes   = db.Column(db.BigInteger, nullable=True)
+    paid_gb      = db.Column(db.Float,      nullable=True)
+    unpaid_bytes = db.Column(db.BigInteger, nullable=True)
+    unpaid_gb    = db.Column(db.Float,      nullable=True)
+    # Set when this row is a placeholder: holds the failure reason, e.g.
+    # "HTTP 500". Cleared once a retry succeeds and the real values land.
+    fetch_error  = db.Column(db.String(200), nullable=True)
 
 # ----------------------------------------
 # Environment Token Management
@@ -150,15 +155,56 @@ def login_check():
 # ----------------------------------------
 # Transfer Statistics Fetching
 # ----------------------------------------
+# Retry budget for one quarter-hour tick. The scheduler fires every 15 minutes,
+# so retries must finish well inside that or they would delay the next window.
+RETRY_BUDGET_SECONDS = 180
+RETRY_BACKOFFS      = (5, 15, 45, 90)   # cumulative: 5, 20, 65, 155s (< 180)
+
 def fetch_transfer_stats(jwt_token: str):
     """
     Retrieve the latest transfer statistics using the provided JWT.
+    Retries transient upstream failures on a time-boxed schedule so a brief
+    500 window does not cost us the whole reading.
+
     Returns:
       - A dict with keys: paid_bytes, paid_gb, unpaid_bytes, unpaid_gb.
+    Raises:
+      - RuntimeError carrying a short, display-friendly reason (e.g. "HTTP 500")
+        when the budget is exhausted.
     """
     headers = {"Authorization": f"Bearer {jwt_token}", "Accept": "*/*"}
-    resp = request_with_retry("get", f"{API_BASE}/transfer/stats", headers=headers)
-    d = resp.json()
+    url = f"{API_BASE}/transfer/stats"
+    last_reason = "unknown error"
+    started = time.monotonic()
+    payload = None
+
+    for delay in RETRY_BACKOFFS + (None,):
+        try:
+            resp = requests.get(url, headers=headers, timeout=60)
+            resp.raise_for_status()
+            payload = resp.json()
+            break
+        except requests.HTTPError as e:
+            code = getattr(getattr(e, "response", None), "status_code", None)
+            last_reason = f"HTTP {code}" if code else f"HTTP error: {e}"
+        except Exception as e:
+            last_reason = f"{type(e).__name__}: {e}"
+
+        if delay is None:
+            break
+        if time.monotonic() - started + delay > RETRY_BUDGET_SECONDS:
+            current_app.logger.warning(
+                f"transfer/stats failed ({last_reason}); out of retry budget")
+            break
+        current_app.logger.warning(
+            f"transfer/stats failed ({last_reason}); retrying in {delay}s")
+        time.sleep(delay)
+
+    if payload is None:
+        raise RuntimeError(last_reason)
+
+    d = payload
+
     paid   = d.get("paid_bytes_provided",   0)
     unpaid = d.get("unpaid_bytes_provided", 0)
     return {
@@ -191,26 +237,36 @@ def get_next_quarter(dt=None):
 @scheduler.task(id="log_stats", trigger="cron", minute="0,15,30,45")
 def log_stats():
     """
-    Runs every quarter-hour:
-      1. Ensures valid JWT.
-      2. Fetches transfer stats.
-      3. Persists a new Stats record in the database.
+    Runs every quarter-hour.
+
+    The row is written the moment the tick fires, as a placeholder carrying the
+    fetch error, so a window the upstream API could not serve still shows up on
+    the grid as a visible gap rather than silently vanishing. If the fetch (and
+    its time-boxed retries) succeeds, that same row is updated in place with the
+    real values and the error is cleared.
     """
     with app.app_context():
+        entry = Stats(fetch_error="pending")
+        db.session.add(entry)
+        db.session.commit()
+        current_app.logger.info(f"Placeholder written @ {entry.timestamp}")
+
         try:
             token = login_check()
             stats = fetch_transfer_stats(token)
-            entry = Stats(
-                paid_bytes   = stats["paid_bytes"],
-                paid_gb      = stats["paid_gb"],
-                unpaid_bytes = stats["unpaid_bytes"],
-                unpaid_gb    = stats["unpaid_gb"]
-            )
-            db.session.add(entry)
+            entry.paid_bytes   = stats["paid_bytes"]
+            entry.paid_gb      = stats["paid_gb"]
+            entry.unpaid_bytes = stats["unpaid_bytes"]
+            entry.unpaid_gb    = stats["unpaid_gb"]
+            entry.fetch_error  = None
             db.session.commit()
             current_app.logger.info(f"Logged @ {entry.timestamp}")
         except Exception as e:
-            current_app.logger.error(f"log_stats aborted: {e}")
+            reason = str(e)
+            # Keep it short so it fits the column.
+            entry.fetch_error = reason[:200]
+            db.session.commit()
+            current_app.logger.error(f"log_stats recorded a gap @ {entry.timestamp}: {reason}")
 
 # ----------------------------------------
 # HTML Template
@@ -294,6 +350,19 @@ TEMPLATE = """
        many distinct steps (green -> mint -> emerald -> cyan -> blue) rather
        than one flat colour. Purple ends before 20; 20 GB and up is hot pink. */
     .heat-0  { color: #e5e7eb !important; }
+    /* A quarter-hour the upstream API could not serve. The row is still there,
+       dimmed and flagged, so a server-side gap is distinguishable from a
+       genuine zero. */
+    .gap-row td { opacity: .55; }
+    .gap-flag {
+      display: inline-block; padding: 1px 7px; border-radius: 999px;
+      font-size: 11px; font-weight: 700; letter-spacing: .02em;
+      background: rgba(239, 68, 68, .16); color: #fca5a5;
+      border: 1px solid rgba(239, 68, 68, .45); white-space: nowrap;
+      opacity: 1;
+    }
+    [data-bs-theme="light"] .gap-flag { color: #991b1b; background: rgba(220, 38, 38, .10); border-color: rgba(185, 28, 28, .40); }
+    .gap-dash { color: #6b7280; }
     .heat-1  { color: #cb2929 !important; }
     .heat-2  { color: #dd3737 !important; }
     .heat-3  { color: #ef4444 !important; }
@@ -405,18 +474,22 @@ TEMPLATE = """
     </thead>
     <tbody id="statsBody">
       {% for row in rows %}
-      <tr>
+      <tr{% if row.fetch_error %} class="gap-row"{% endif %}>
         <td>{{ row.ts_str }}</td>
-        <td>{{ "%.3f"|format(row.paid_gb) }}</td>
-        <td>{{ "{:,}".format(row.unpaid_bytes) }}</td>
-        <td class="{{ sign_class(row.delta_bytes) }}">
-          {% if row.delta_bytes is not none %}
+        <td>{% if row.paid_gb is not none %}{{ "%.3f"|format(row.paid_gb) }}{% else %}<span class="gap-dash">&mdash;</span>{% endif %}</td>
+        <td>{% if row.unpaid_bytes is not none %}{{ "{:,}".format(row.unpaid_bytes) }}{% else %}<span class="gap-dash">&mdash;</span>{% endif %}</td>
+        <td{% if row.fetch_error %} class="gap-flag-cell"{% endif %}>
+          {% if row.fetch_error %}
+            <span class="gap-flag">{{ row.fetch_error }}</span>
+          {% elif row.delta_bytes is not none %}
             {{ "{:,}".format(row.delta_bytes) }}
           {% else %}N/A{% endif %}
         </td>
-        <td>{{ "%.3f"|format(row.unpaid_gb) }}</td>
-        <td class="{{ heat_class(row.delta_gb) }}" style="{{ pulse_style(row.delta_gb) }}">
-          {% if row.delta_gb is not none %}
+        <td>{% if row.unpaid_gb is not none %}{{ "%.3f"|format(row.unpaid_gb) }}{% else %}<span class="gap-dash">&mdash;</span>{% endif %}</td>
+        <td class="{{ '' if row.fetch_error else heat_class(row.delta_gb) }}" style="{{ '' if row.fetch_error else pulse_style(row.delta_gb) }}">
+          {% if row.fetch_error %}
+            <span class="gap-dash">&mdash;</span>
+          {% elif row.delta_gb is not none %}
             {{ "%.3f"|format(row.delta_gb) }}
           {% else %}N/A{% endif %}
         </td>
@@ -535,11 +608,21 @@ TEMPLATE = """
 
     function buildRow(r){
       const tr = document.createElement('tr');
-      const cells = [r.ts_str, fmtF(r.paid_gb), fmtN(r.unpaid_bytes),
-                     fmtN(r.delta_bytes), fmtF(r.unpaid_gb), fmtF(r.delta_gb)];
+      const gap = r.fetch_error || null;
+      const cells = [r.ts_str,
+                     gap ? '\u2014' : fmtF(r.paid_gb),
+                     gap ? '\u2014' : fmtN(r.unpaid_bytes),
+                     gap ? r.fetch_error : fmtN(r.delta_bytes),
+                     gap ? '\u2014' : fmtF(r.unpaid_gb),
+                     gap ? '\u2014' : fmtF(r.delta_gb)];
       cells.forEach((text, i) => {
         const td = document.createElement('td');
         td.textContent = text;
+        if (gap){
+          if (i === 3) td.className = 'gap-flag';
+          if (i === 3) tr.className = 'gap-row';
+          return;   // no heat colour or animation on a gap row
+        }
         // Change Bytes: default body color. Change (GB): traffic-light heat
         // map. Thresholds mirror HEAT_THRESHOLDS in app.py.
         if (i === 5){
@@ -625,7 +708,7 @@ def _row_payload(e, nxt):
     local_tz = datetime.datetime.now().astimezone().tzinfo
     utc_dt   = e.timestamp.replace(tzinfo=datetime.timezone.utc)
     local_dt = utc_dt.astimezone(local_tz)
-    if nxt is not None:
+    if nxt is not None and e.unpaid_bytes is not None and nxt.unpaid_bytes is not None:
         delta_b = e.unpaid_bytes - nxt.unpaid_bytes
         delta_g = e.unpaid_gb    - nxt.unpaid_gb
     else:
@@ -638,6 +721,7 @@ def _row_payload(e, nxt):
         "delta_bytes": delta_b,
         "delta_gb":   delta_g,
         "cursor":     e.timestamp.isoformat(),
+        "fetch_error": e.fetch_error,
     }
 
 # HEAT_BOUNDS are the inclusive lower edges (GB) of each heat tier. The ramp
@@ -843,8 +927,59 @@ def clear_db():
 # ----------------------------------------
 # Application Entry Point
 # ----------------------------------------
+def _migrate_stats_for_gaps():
+    """
+    Bring an existing `stats` table up to the gap-tracking schema.
+
+    Two things are needed and neither is done by create_all():
+      1. a `fetch_error` column to record why a reading is missing, and
+      2. the value columns must allow NULL, because a placeholder row is
+         written the moment a tick fires and is filled in only if the fetch
+         later succeeds.
+
+    SQLite cannot drop a NOT NULL constraint in place, so the table is
+    rebuilt: copy the rows, drop, recreate, copy back. Done inside a
+    transaction and only when the schema is actually behind, so it is a
+    no-op on an up-to-date database.
+    """
+    with db.engine.connect() as conn:
+        info = list(conn.execute(db.text("PRAGMA table_info(stats)")))
+        if not info:
+            return
+        names = {r[1] for r in info}
+        needs_column = "fetch_error" not in names
+        notnull = {r[1] for r in info if r[3]}          # r[3] == notnull flag
+        needs_nullable = bool(notnull & {"paid_bytes", "paid_gb",
+                                         "unpaid_bytes", "unpaid_gb"})
+        if not (needs_column or needs_nullable):
+            return
+
+        app.logger.info("Migrating stats table for gap tracking "
+                        f"(add_column={needs_column}, relax_notnull={needs_nullable})")
+        with db.engine.begin() as conn:
+            cols = [r[1] for r in info]
+            keep = [c for c in cols if c not in ("id",)]
+            select = ", ".join(f'"{c}"' for c in keep)
+            conn.execute(db.text("ALTER TABLE stats RENAME TO stats_old"))
+            conn.execute(db.text("""
+                CREATE TABLE stats (
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp    DATETIME    DEFAULT CURRENT_TIMESTAMP,
+                    paid_bytes   BIGINT,
+                    paid_gb      FLOAT,
+                    unpaid_bytes BIGINT,
+                    unpaid_gb    FLOAT,
+                    fetch_error  VARCHAR(200)
+                )"""))
+            conn.execute(db.text(
+                f"INSERT INTO stats ({select}) SELECT {select} FROM stats_old"))
+            conn.execute(db.text("DROP TABLE stats_old"))
+        app.logger.info("stats table migrated")
+
+
 if __name__ == "__main__":
     with app.app_context():
         db.create_all()
+        _migrate_stats_for_gaps()
     scheduler.start()
     app.run(host="0.0.0.0", port=3000, debug=False)
