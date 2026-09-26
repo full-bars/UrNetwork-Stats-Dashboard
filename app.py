@@ -392,7 +392,7 @@ TEMPLATE = """
 
   <!-- TABLE (newest first) -->
   <div class="table-scroll">
-  <table class="table table-striped table-sm">
+  <table class="table table-striped">
     <thead>
       <tr>
         <th title="Time the data was recorded">🗓️ Timestamp</th>
